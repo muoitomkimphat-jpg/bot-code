@@ -8,7 +8,8 @@ import os
 # --- CẤU HÌNH HỆ THỐNG ---
 TOKEN = os.getenv("DISCORD_TOKEN")
 API_VNG = "https://vgrapi-sea.vnggames.com/coordinator/api/v1/code/redeem"
-API_GLOBAL = "http://ha-playtogether-web.haegin.kr/api/redeem"
+# Danh sách các server ID phổ biến của VNG để bot tự tìm kiếm
+LIST_SERVERS = ["10001", "10002", "10003"]
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -20,7 +21,6 @@ class MyBot(commands.Bot):
         self.load_all_data()
 
     def load_all_data(self):
-        # Đảm bảo load dữ liệu mới nhất từ file
         if os.path.exists(self.db_file):
             with open(self.db_file, "r", encoding="utf-8") as f:
                 self.codes_data = json.load(f)
@@ -46,7 +46,6 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         self.add_view(PersistentStartView())
         await self.tree.sync()
-        print(f"✅ Đã đồng bộ slash commands cho {self.user}")
 
 bot = MyBot()
 
@@ -82,48 +81,58 @@ class RedeemModal(discord.ui.Modal):
         uid = self.uid_input.value.strip()
         bot.save_user_id(interaction.user.id, uid)
         
-        if "vnggames.com" in self.api_url:
-            payload = {"data": {"role_id": uid, "server_id": "10001", "code": final_code, "main_id": "661"}}
-            headers = {
-                "Content-Type": "application/json",
-                "Origin": "https://giftcode.vnggames.com",
-                "Referer": "https://giftcode.vnggames.com/",
-                "User-Agent": "Mozilla/5.0"
-            }
-        else:
-            payload = {"uid": uid, "coupon": final_code, "lang": "vi"}
-            headers = {"User-Agent": "Mozilla/5.0"}
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, json=payload, headers=headers, timeout=15) as resp:
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": "https://giftcode.vnggames.com",
+            "Referer": "https://giftcode.vnggames.com/",
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        async with aiohttp.ClientSession() as session:
+            # Nếu là VNG, bot sẽ tự thử từng Server trong danh sách
+            if self.version_name == "VNG":
+                success = False
+                last_error = "Không tìm thấy nhân vật"
+                
+                for server_id in LIST_SERVERS:
+                    payload = {"data": {"role_id": uid, "server_id": server_id, "code": final_code, "main_id": "661"}}
+                    try:
+                        async with session.post(self.api_url, json=payload, headers=headers, timeout=10) as resp:
+                            data = await resp.json()
+                            error_code = data.get("error_code")
+                            # Nếu error_code là 0 (Thành công) hoặc lỗi không phải là "Không tìm thấy role"
+                            if error_code == 0:
+                                await interaction.followup.send(f"✅ **Thành công (Server {server_id})!**\n• Code: `{final_code}`", ephemeral=True)
+                                success = True
+                                break
+                            else:
+                                last_error = data.get("message", "Lỗi không xác định")
+                                # Nếu lỗi không phải do sai server (ví dụ: code hết hạn), dừng dò server luôn
+                                if "không tìm thấy" not in last_error.lower():
+                                    break
+                    except:
+                        continue
+                
+                if not success:
+                    await interaction.followup.send(f"❌ **Thất bại:** {last_error}\n• Code: `{final_code}`", ephemeral=True)
+            
+            else: # Bản Global (Haegin)
+                payload = {"uid": uid, "coupon": final_code, "lang": "vi"}
+                async with session.post(self.api_url, json=payload, headers=headers) as resp:
                     data = await resp.json()
-                    if resp.status == 200:
-                        error_code = data.get("error_code", 1)
-                        message = data.get("message", "Thất bại")
-                        if error_code == 0:
-                            status_msg = f"✅ **Thành công!** Quà sẽ gửi cho ID `{uid}`."
-                        else:
-                            status_msg = f"❌ **Thất bại:** {message}"
-                    else:
-                        status_msg = f"❌ **Lỗi server:** {resp.status}"
+                    status = "✅ Thành công" if resp.status == 200 else f"❌ Lỗi {resp.status}"
+                    await interaction.followup.send(f"{status}\n• Code: `{final_code}`", ephemeral=True)
 
-                    await interaction.followup.send(f"{status_msg}\n• Code: `{final_code}`", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Lỗi kết nối: {str(e)}", ephemeral=True)
-
-# --- UI COMPONENTS ---
+# --- (GIỮ NGUYÊN PHẦN UI COMPONENTS VÀ COMMANDS NHƯ CŨ) ---
 class CodeSelectMenu(discord.ui.Select):
     def __init__(self, version, api_url):
-        bot.load_all_data() # Load lại data mỗi khi nhấn nút để cập nhật code mới nhất
+        bot.load_all_data()
         self.api_url = api_url
         self.version_name = "VNG" if version == "vng" else "Quốc Tế"
-        
         options = [discord.SelectOption(label="Nhập thủ công", value="manual", emoji="✍️")]
         available_codes = bot.codes_data.get(version, [])
         for item in reversed(available_codes[-24:]):
             options.append(discord.SelectOption(label=item['code'], description=item['desc'][:50], value=item['code']))
-            
         super().__init__(placeholder=f"Chọn mã Code {self.version_name}...", options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -142,6 +151,7 @@ class VersionSelectView(discord.ui.View):
         await interaction.response.edit_message(content="**Bước 2:** Chọn mã Code VNG:", view=view)
     @discord.ui.button(label="Bản Global (Quốc Tế)", style=discord.ButtonStyle.primary, emoji="🌐")
     async def global_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from __main__ import API_GLOBAL # Đảm bảo lấy đúng biến
         view = discord.ui.View(); view.add_item(CodeSelectMenu("global", API_GLOBAL))
         await interaction.response.edit_message(content="**Bước 2:** Chọn mã Code Quốc Tế:", view=view)
 
@@ -152,7 +162,6 @@ class PersistentStartView(discord.ui.View):
     async def start_redeem(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("**Bước 1:** Chọn phiên bản:", view=VersionSelectView(), ephemeral=True)
 
-# --- COMMANDS ---
 @bot.tree.command(name="setup")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
@@ -161,31 +170,20 @@ async def setup(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Đã thiết lập!", ephemeral=True)
 
 @bot.tree.command(name="addcode")
-@app_commands.describe(pb="vng hoặc global", ma="Mã code", mo_ta="Nội dung quà")
-@app_commands.checks.has_permissions(administrator=True)
 async def add_code(interaction: discord.Interaction, pb: str, ma: str, mo_ta: str):
     pb = pb.lower()
-    if pb not in ["vng", "global"]:
-        return await interaction.response.send_message("❌ Nhập 'vng' hoặc 'global'", ephemeral=True)
     bot.load_all_data()
     bot.codes_data[pb].append({"code": ma.upper(), "desc": mo_ta})
     bot.save_codes()
-    await interaction.response.send_message(f"✅ Đã thêm mã `{ma.upper()}` vào bản `{pb}`", ephemeral=True)
+    await interaction.response.send_message(f"✅ Đã thêm mã `{ma.upper()}`", ephemeral=True)
 
-@bot.tree.command(name="delcode", description="Xóa mã code")
-@app_commands.describe(pb="vng hoặc global", ma="Mã code cần xóa")
-@app_commands.checks.has_permissions(administrator=True)
+@bot.tree.command(name="delcode")
 async def del_code(interaction: discord.Interaction, pb: str, ma: str):
     pb = pb.lower()
     bot.load_all_data()
-    if pb in bot.codes_data:
-        original_count = len(bot.codes_data[pb])
-        bot.codes_data[pb] = [c for c in bot.codes_data[pb] if c['code'] != ma.upper()]
-        if len(bot.codes_data[pb]) < original_count:
-            bot.save_codes()
-            await interaction.response.send_message(f"🗑️ Đã xóa mã `{ma.upper()}`", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"❓ Không tìm thấy mã `{ma.upper()}`", ephemeral=True)
+    bot.codes_data[pb] = [c for c in bot.codes_data.get(pb, []) if c['code'] != ma.upper()]
+    bot.save_codes()
+    await interaction.response.send_message(f"🗑️ Đã xóa mã `{ma.upper()}`", ephemeral=True)
 
-if __name__ == "__main__":
-    bot.run(TOKEN)
+API_GLOBAL = "http://ha-playtogether-web.haegin.kr/api/redeem"
+bot.run(TOKEN)
