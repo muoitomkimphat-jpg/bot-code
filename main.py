@@ -154,4 +154,6 @@ async def add_code(interaction: discord.Interaction, pb: str, ma: str, emo: str)
     bot.load_all_data()
     bot.codes_data[pb].append({"code": ma.upper(), "emoji": emo})
     bot.save_data(bot.db_file, bot.codes_data)
-    await
+    await interaction.response.send_message(f"✅ Đã thêm mã `{ma.upper()}` thành công!", ephemeral=True)
+
+bot.run(TOKEN)
