@@ -1,25 +1,29 @@
 import discord
-from discord import app_commands
 from discord.ext import commands
 import aiohttp
 import json
 import os
+import asyncio
 
-# --- CẤU HÌNH ---
-# BẮT BUỘC: Thay TOKEN mới vào đây, Token hiện tại của bạn đang bị lỗi LoginFailure
-TOKEN = "GIAO_DIEN_MOI_LAY_TOKEN_TAI_DAY" 
+# ================= CONFIG =================
 
-# Cập nhật API Endpoint chuẩn để tránh lỗi 404
-API_VNG = "https://vgrapi-sea.vnggames.com/coordinator/api/v1/code/redeem"
+TOKEN = os.getenv("DISCORD_TOKEN")  # KHÔNG ghi token trực tiếp
 
-# Server 2 của bạn là 80002
+if not TOKEN:
+    raise ValueError("❌ Chưa thiết lập DISCORD_TOKEN trong biến môi trường!")
+
+API_VNG = "https://vgrapi-sea.vnggames.com/coordinator/api/v1/code/redeem?lang=vi"
+
 LIST_SERVERS = ["80002", "80001", "10001"]
+
+# ================= BOT CLASS =================
 
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
+
         self.db_file = "database.json"
         self.user_data_file = "users.json"
         self.load_all_data()
@@ -31,85 +35,135 @@ class MyBot(commands.Bot):
     def read_json(self, file, default):
         if os.path.exists(file):
             with open(file, "r", encoding="utf-8") as f:
-                try: return json.load(f)
-                except: return default
+                try:
+                    return json.load(f)
+                except:
+                    return default
         return default
 
-    def save_data(self, file, data):
+    def save_json(self, file, data):
         with open(file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
     async def setup_hook(self):
         self.add_view(MainView())
         await self.tree.sync()
+        print("✅ Bot đã sync slash command!")
 
 bot = MyBot()
 
-# --- LOGIC NẠP CODE ĐÃ FIX LỖI 404 & REGION ---
+# ================= LOGIC NẠP CODE =================
+
 async def redeem_vng_logic(uid, code):
-    # Header lấy chính xác từ Screenshot 2026-02-18 210644.png của bạn
     headers = {
-        "authority": "vgrapi-sea.vnggames.com",
         "accept": "application/json, text/plain, */*",
         "content-type": "application/json",
         "origin": "https://giftcode.vnggames.com",
         "referer": "https://giftcode.vnggames.com/",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "user-agent": "Mozilla/5.0",
         "x-client-region": "vn",
         "x-vng-main-id": "661",
         "x-vng-region": "vn"
     }
-    
-    async with aiohttp.ClientSession() as session:
-        for sv_id in LIST_SERVERS:
-            # Payload gửi kèm lang=vi để khớp với web
+
+    timeout = aiohttp.ClientTimeout(total=10)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for server_id in LIST_SERVERS:
+
             payload = {
                 "data": {
-                    "role_id": str(uid).strip(), 
-                    "server_id": sv_id, 
-                    "code": str(code).strip(), 
+                    "role_id": str(uid).strip(),
+                    "server_id": server_id,
+                    "code": str(code).strip(),
                     "main_id": "661"
                 }
             }
+
             try:
-                # Thêm tham số lang=vi vào URL để tránh 404 tùy server
-                url_with_lang = f"{API_VNG}?lang=vi"
-                async with session.post(url_with_lang, json=payload, headers=headers, timeout=10) as resp:
+                async with session.post(API_VNG, json=payload, headers=headers) as resp:
+
                     if resp.status != 200:
-                        print(f"DEBUG: Server {sv_id} lỗi HTTP {resp.status}")
                         continue
-                    
+
                     data = await resp.json()
-                    msg = data.get("message", "")
-                    print(f"Server {sv_id} phản hồi: {msg}")
+                    message = data.get("message", "")
 
-                    if "không tìm thấy" not in msg.lower():
-                        if data.get("error_code") == 0:
-                            return f"✅ **Thành công!** (Nhân vật tại Server {sv_id})"
-                        return f"❌ {msg}"
-            except: continue
-        return "❌ Vẫn không tìm thấy nhân vật. Hãy chắc chắn bạn dùng UID `NK5X-DUHL-LMGC`."
+                    print(f"[DEBUG] Server {server_id}: {message}")
 
-# --- GIAO DIỆN MODAL ---
+                    if data.get("error_code") == 0:
+                        return f"✅ Thành công tại server {server_id}"
+
+                    if "không tìm thấy" not in message.lower():
+                        return f"❌ {message}"
+
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                print("Lỗi:", e)
+                continue
+
+    return "❌ Không tìm thấy nhân vật hoặc code sai."
+
+# ================= MODAL =================
+
 class IDModal(discord.ui.Modal, title="Nạp Code Play Together"):
-    uid_input = discord.ui.TextInput(label="ID (UID)", default="NK5X-DUHL-LMGC")
-    code_input = discord.ui.TextInput(label="Mã Code", placeholder="Nhập Giftcode...")
+
+    uid_input = discord.ui.TextInput(
+        label="ID (UID)",
+        placeholder="Ví dụ: NK5X-DUHL-LMGC",
+        required=True
+    )
+
+    code_input = discord.ui.TextInput(
+        label="Mã Giftcode",
+        placeholder="Nhập code...",
+        required=True
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        res = await redeem_vng_logic(self.uid_input.value, self.code_input.value)
-        await interaction.followup.send(f"**Kết quả:** {res}", ephemeral=True)
+
+        result = await redeem_vng_logic(
+            self.uid_input.value,
+            self.code_input.value
+        )
+
+        await interaction.followup.send(
+            f"**Kết quả:** {result}",
+            ephemeral=True
+        )
+
+# ================= VIEW =================
 
 class MainView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="NẠP CODE VNG", style=discord.ButtonStyle.danger, custom_id="vng_btn")
-    async def vng(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+    @discord.ui.button(
+        label="NẠP CODE VNG",
+        style=discord.ButtonStyle.danger,
+        custom_id="vng_btn"
+    )
+    async def vng_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(IDModal())
 
-@bot.tree.command(name="setup")
-async def setup(interaction: discord.Interaction):
-    await interaction.channel.send("🚀 Nhấn để nạp code!", view=MainView())
-    await interaction.response.send_message("Xong!", ephemeral=True)
+# ================= SLASH COMMAND =================
+
+@bot.tree.command(name="setup", description="Tạo nút nạp code")
+async def setup_command(interaction: discord.Interaction):
+    await interaction.channel.send(
+        "🚀 Nhấn nút bên dưới để nạp code:",
+        view=MainView()
+    )
+    await interaction.response.send_message("✅ Đã tạo nút!", ephemeral=True)
+
+# ================= READY EVENT =================
+
+@bot.event
+async def on_ready():
+    print(f"🔥 Bot đã online: {bot.user}")
+
+# ================= RUN =================
 
 bot.run(TOKEN)
