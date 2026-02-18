@@ -203,4 +203,3 @@ async def on_ready():
     print(f"✅ Bot đã sẵn sàng: {bot.user.name}")
 
 bot.run(TOKEN)
-)
